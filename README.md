@@ -119,12 +119,12 @@ Ces labs sont indépendants de mes projets personnels, mais certaines connaissan
 
 Par exemple, les connaissances acquises sur :
 
-les namespaces;
-les cgroups;
-le réseau Linux;
-le stockage;
-les processus;
-systemd;
+- les namespaces;
+- les cgroups;
+- le réseau Linux;
+- le stockage;
+- les processus;
+- systemd;
 
 pourront être mises en pratique dans mon homelab Kubernetes et dans d'autres projets.
 

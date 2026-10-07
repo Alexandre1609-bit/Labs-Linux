@@ -15,7 +15,7 @@ alex       58879   40375  0  3462  4856   3 15:59 pts/0    00:00:00 ps -F
 
 Comme nous pouvons le voir ci-dessus, notre shell (ici zsh) a bien son PID 40375 et dépend d'un autre processus, avec un PPID assez proche 40367. Cela pourrait ajouter une preuve à notre hypothèse de départ (_cf:note1_): Un processus et enfait une copie d'un autre processus. Les deux PID étant proche l'un de l'autre nous ne pouvons pas écarter cette piste, cependant il est bon de noter que nous ne disposons, à l'heure actuelle d'aucune autre information capable d'alimenter cette théorie.
 
-Afin de facilité l'avancement nous allons procédé par schéma, pour le moment nous avons:
+Afin de facilité l'avancement nous allons procéder par schéma, pour le moment nous avons:
 
 ```text
 processus 40367
@@ -34,7 +34,7 @@ alex       40375   40367  0  4749 10224   5 15:10 pts/0    00:00:03 zsh
 alex       58879   40375  0  3462  4856   3 15:59 pts/0    00:00:00 ps -F
 ```
 
-Nous voyons que `ps -F` est un enfant de notre shell, de zsh. Il nous faut maintenant essayer de voir si `ps` est réellement une copie de zsh.
+Nous voyons que `ps -F` est un enfant de notre shell zsh. Il nous faut maintenant essayer de voir si `ps` est réellement une copie de zsh.
 
 En lançant `sleep 100 &` et ensuite `ps -F` on valide une première observation:
 
@@ -49,7 +49,7 @@ alex       65719   40375  0  3462  4852   4 16:27 pts/0    00:00:00 ps -F
 `Sleep` partage le même PPID que `ps`, nous pouvons conclure que notre shell possède un processus enfant, qui correspond à la commande qu'on vient de lancer.
 Cependant nous n'avons toujours pas observé comment le shell crée un processus enfant.
 
-Afin d'essayer d'avancer et d'observer comment un processus est crée nous pouvons utiliser strace. (_trace system calls and signals_). Avec ce nouvel outil nous allons pouvoir voir si nos appels système fork et exec ont bien lieu.
+Afin d'essayer d'avancer et d'observer comment un processus est crée nous pouvons utiliser **strace**. (_trace system calls and signals_). Avec ce nouvel outil nous allons pouvoir voir si nos appels système `fork` et `exec` ont bien lieu.
 
 Pour une première utilisation nous allons utiliser `strace -c ls`. Le flag "-c" (_summary-only_) nous permet d'avoir un résumé rapide des différents appels système utilisés ainsi que d'autres informations.
 
@@ -83,7 +83,7 @@ lab01-proc.md
 100,00    0,000578           7        74         4 total
 ```
 
-Avec ce première exemple nous pouvons déjà voir plusieurs choses interéssantes: pour l'exécution d'une commande il y a pas mal d'appels système engagé, dans un laps de temps extrêmement court. Ensuite, on peut voir ici l'appel `execve` (_execve - execute program_) qui lui demande au noyau de remplacer un programme actuellemenr exécuté par un autre programme.(_execve() executes the program referred to by pathname. This causes the program that is currently being run by the calling process to be replaced with a new program,_).
+Avec ce première exemple nous pouvons déjà voir plusieurs choses interéssantes: pour l'exécution d'une commande il y a pas mal d'appels système engagé et ce, dans un laps de temps extrêmement court. Ensuite, on peut voir ici l'appel `execve` (_execve - execute program_) qui demande au noyau de remplacer un programme actuellement exécuté par un autre programme.(_execve() executes the program referred to by pathname. This causes the program that is currently being run by the calling process to be replaced with a new program,_).
 
 Avec cette première expérience nous obtenons quelque chose de la sorte :
 
@@ -112,7 +112,7 @@ La commande suivante sera donc utilsée :`strace -f -e trace=process zsh -c 'ls'
 Le flag "-f" demande à strace de suivre les processus enfants: "_-f (--follow-forks: Trace child processes as they are created by currently traced processes as a result of the fork(2), vfork(2) and clone(2) system calls.)"_
 
 Et "-e" demande d'afficher uniquement les appels liés à la gestion des processus.
-"_(Trace only the specified set of system calls. syscall_set is defined as [!]value[,value], and value can be one of the following:[...])_"
+"_Trace only the specified set of system calls. syscall_set is defined as [!]value[,value], and value can be one of the following:[...])_"
 
 L'output obtenu est le suivant:
 
@@ -143,7 +143,7 @@ exit_group(0) = ?
     ls
 ```
 
-- Le premier processus lancé, ici `zsh`, est remplacé par `ls`. À ce moment précis nous n'avons pas encore observé d'appel "fork()" ou d'équivalent comme "clone()". Peut être que par optimisation cet appel peut être omis par le shell ?
+- Le premier processus lancé, ici `zsh`, est remplacé par `ls`. À ce moment précis nous n'avons pas encore observé d'appel `fork()` ou d'équivalent comme `clone()`. Peut être que par optimisation cet appel peut être omis par le shell ?
 
 Afin d'essayer plus de choses nous allons maintenant reprendre notre dernière commande mais y ajouter `echo`. L'objectif ici est de forcer notre shell à rester en vie après avoir lancé `ls` afin d'exécuter notre commande `echo`. Peut être aurons-nous des résultats plus interéssants ?
 
@@ -165,7 +165,7 @@ exit_group(0)                           = ?
 +++ exited with 0 +++
 ```
 
-Ici notre expérience prend tout son sens. En analysant ligne par ligne nous nous rendons compte du cheminement pour la commande `ls`. Tout d'abord nbotre shell est crée `execve("/usr/bin/zsh"...` Ensuite, zsh crée un processus enfant, cloné depuis zsh, mais pas en intégralité `clone(child_stack=NULL, flags=CLONE_CHILD_CLEARTID|CLONE_CHILD_SETTID|SIGCHLD, child_tidptr=0x732080c3a590) = 78624`. Le processus enfant est cloné avec les "flag" "CLONE_CHILD_CLEARTID|CLONE_CHILD_SETTID|SIGCHLD, child_tidptr". Ces flags seront les ressources qu'auront en communs notre processus parent et le clone crée. Cette ligne `strace: Process 78624 attached` nous montre qu'un nouveau processus a correctement été crée, qu'il existe réellement. Ensuite, notre processus devient `ls` via `execve()`: `[pid 78624] execve("/usr/bin/ls", ["ls"]`. Notre processus enfant, avec le PID 78624 vient d'être crée par `clone()` et devient le processus qui exécute `ls`. Notre schéma peut donc être actualisé:
+Ici notre expérience prend tout son sens. En analysant ligne par ligne nous nous rendons compte du cheminement pour la commande `ls`. Tout d'abord nbotre shell est crée `execve("/usr/bin/zsh"...` Ensuite, zsh crée un processus enfant, cloné depuis zsh, mais pas en intégralité: `clone(child_stack=NULL, flags=[...]= 78624`. Le processus enfant est cloné avec les "flag" `CLONE_CHILD_CLEARTID|CLONE_CHILD_SETTID|SIGCHLD, child_tidptr`. Ces flags seront les ressources qu'auront en communs notre processus parent et le clone crée. Cette ligne `strace: Process 78624 attached` nous montre qu'un nouveau processus a correctement été crée, qu'il existe réellement. Ensuite, notre processus devient `ls` via `execve()`: `[pid 78624] execve("/usr/bin/ls", ["ls"]`. Notre processus enfant, avec le PID 78624 vient d'être crée par `clone()` et devient le processus qui exécute `ls`. Notre schéma peut donc être actualisé:
 
 ```text
                  ZSH

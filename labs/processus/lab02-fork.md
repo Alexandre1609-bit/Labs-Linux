@@ -165,4 +165,171 @@ Nous pouvons voir que notre "original" voit sa variable `x` changer, son enfant,
 
 **Si leurs espaces mémoire sont distincts, est-ce que Linux recopie réellement toute la mémoire au moment du fork(), ou est-ce qu'il optimise cette copie ?**
 
-_WIP, suite à venir ! :)_
+Le manuel de `fork` (_man fork_) nous donne pas mal d'informations sur le sujet: " The child process and the parent process run in separate memory spaces. At the time of fork() both memory spaces have the same content. Memory writes, file mappings (mmap(2)), and unmappings (munmap(2)) performed by one of the processes do not affect the other." Cependant nous ne l'avons pas encore prouvé.
+
+Aussi, en contraste à `fork` l'appel `clone` semble plus précis et permet un meilleur contrôle sur ce qui est réellement partagé entre parent et enfant. "By contrast with fork(2), these system calls provide more precise control over what pieces of execution context are shared between the calling process and the child process." (_man clone_)
+
+L'objectif étant de comprendre les processus à un certain degrés et non parfaitement je ne chercherais donc pas à comprendre l'entièreté des appel système, des flags et tout ce qui gravite autout.
+
+## Quatrième expérience
+
+Jusqu'ici nous avons établi deux choses :
+
+- Après `fork()`, le parent et l'enfant ont des espaces mémoire distincts du point de vue du programme.
+- Modifier x dans le parent ne modifie pas la valeur de x dans l'enfant.
+
+Mais cela ne signifie pas que Linux recopie immédiatement toute la mémoire physique. Pour comprendre cette nuance, nous allons comparer deux programmes qui allouent un bloc mémoire important.
+
+```C
+#include <stdio.h>
+#include <stdlib.h>
+#include <unistd.h>
+#include <sys/wait.h>
+
+#define SIZE (100 * 1024 * 1024)
+
+int main(void) {
+    char *memory = malloc(SIZE);
+
+    if (memory == NULL) {
+        perror("malloc");
+        return 1;
+    }
+
+    for (size_t i = 0; i < SIZE; i += 4096) {
+        memory[i] = 1;
+    }
+
+    printf("Avant fork : PID=%d\n", getpid());
+    fflush(stdout);
+
+    pid_t pid = fork();
+
+    if (pid < 0) {
+        perror("fork");
+        free(memory);
+        return 1;
+    }
+
+    if (pid == 0) {
+        printf("Enfant : PID=%d, première valeur=%d\n",
+               getpid(), memory[0]);
+        memory[0] = 2;
+        printf("Enfant : valeur modifiée=%d\n", memory[0]);
+    } else {
+        wait(NULL);
+        printf("Parent : PID=%d, première valeur=%d\n",
+               getpid(), memory[0]);
+    }
+
+    free(memory);
+    return 0;
+}
+```
+
+Voici les résultats obtenus:
+
+```bash
+Avant fork : PID=83836
+Enfant : PID=83841, première valeur=1
+Enfant : valeur modifiée=2
+Parent : PID=83836, première valeur=1
+```
+
+Nous pouvons voir que la valeur modifié de l'enfant n'a pas eu d'impact, du moins visible, sur la valeur du parent, qui elle, est restée à 1 le tout avec un bloc de mémoire plus conséquent, ici 100Mio. Cela rejoint nos observation précédent, les espaces mémoires semblent indépendants du point de vue des processus. Cependant nous n'avons pas encore pu observer le phénomène de "_CoW_" (_Copy On Write_\*).
+
+En modifiant légèrement le code en ajoutant une pause temporaire (\*sleep):
+
+```C
+if (pid == 0) {
+    printf("Enfant : PID=%d\n", getpid());
+    sleep(30);
+    memory[0] = 2;
+} else {
+    printf("Parent : PID=%d, enfant=%d\n", getpid(), pid);
+    sleep(30);
+    wait(NULL);
+    printf("Parent : memory[0]=%d\n", memory[0]);
+}
+```
+
+Nous obtenons les résultats suivants:
+
+```
+Avant fork : PID=88574
+Parent : PID=88574, enfant=88575
+Enfant : PID=88575
+Parent : memory[0]=1
+```
+
+Cependant ce qui nous intéresse vraiment est l'output des commandes suivantes:
+
+```bash
+grep -E '^(Rss|Pss|Private_Dirty|Shared_Dirty|Private_Clean|Shared_Clean):' /proc/83836/smaps_rollup
+grep -E '^(Rss|Pss|Private_Dirty|Shared_Dirty|Private_Clean|Shared_Clean):' /proc/83841/smaps_rollup
+```
+
+Qui est:
+
+Parent:
+
+```bash
+Rss:              104124 kB
+Pss:               51284 kB
+Shared_Clean:       1620 kB
+Shared_Dirty:     102468 kB
+Private_Clean:         4 kB
+Private_Dirty:        32 kB
+```
+
+Enfant:
+
+```bash
+Rss:              103212 kB
+Pss:               51274 kB
+Shared_Clean:        712 kB
+Shared_Dirty:     102468 kB
+Private_Clean:         0 kB
+Private_Dirty:        32 kB
+```
+
+Les observations sont nombreuses, ne connaissant pas tous les termes je vais essayer d'interpréter au mieux ce que je vois en me renseigant en ammont:
+
+Observation 1 : chaque processus possède un RSS d'environ 100 Mio.
+Ceci cohérent avec le bloc mémoire de 100 Mio que nous avons alloué et touché avant le fork(). Mais le RSS inclut aussi d'autres pages du programme, des bibliothèques et des mappings.
+
+Observation 2 : les deux PSS sont proches de 50 Mio.
+C'est un indice particulièrement intéressant : lorsqu'une page est partagée par deux processus, sa contribution au PSS est répartie entre eux. Une grande partie de leur mémoire pourrait donc être commune physiquement. Plus de processus partagent la même page plus leur PSS est faible ?
+
+Observation 3 : Shared_Dirty vaut 102 468 Kio dans les deux processus.
+Cette quantité importante est compatible avec notre hypothèse : une partie importante des pages modifiées avant le fork() reste partagée physiquement après celui-ci, tant qu'elles n'ont pas besoin d'être séparées.
+
+Ces observations ne constituent pas une preuve isolée que chaque page est partagée, mais cela cohérent avec le **Copy-On-Write**.
+
+Mais pourquoi les valeurs diffèrent-elles ?
+
+Nous relevons environ 900 Kio d'écart sur le RSS. C'est normal que les valeurs ne soient pas exactement identiques: les processus n'ont pas nécessairement les mêmes pages résidentes à un instant donné. Les bibliothèques, piles, données privées et autres mappings peuvent différer !
+Il ne faut donc pas conclure que Linux a fait une copie imparfaite. Les compteurs décrivent la mémoire associée aux processus, pas une comparaison octet par octet de leurs contenus.
+
+## Conclusion
+
+- fork() crée un enfant avec un espace mémoire distinct de celui du parent.
+- Initialement, les données observées par les deux processus sont cohérentes avec le même état au moment de la création.
+- Linux peut laisser les deux processus utiliser les mêmes pages physiques tant qu'aucune écriture ne nécessite de les séparer.
+- Lorsqu'un processus modifie une page privée partagée via COW, le noyau peut créer une copie de cette page pour préserver l'indépendance des espaces mémoire.
+
+Nuance importante: nous avons observé l'indépendance des valeurs et des compteurs compatibles avec le COW. Nous n'avons pas suivi directement une page physique précise pendant son écriture. Pour mon objectif de compréhension générale de Linux, ce niveau me paraît suffisant.
+
+## Notes
+
+J'aimerais revenir sur certains points / hypothèses que j'aimerais clarifier afin de ne pas laisser le tout sans suite:
+
+- Les PID proches : leur proximité n'est pas une règle permettant d'identifier une relation parent-enfant. Le PPID est l'indice pertinent ici.
+
+- COW : les résultats sont compatibles avec ce mécanisme, mais nous n'avons pas directement suivi la copie d'une page physique au moment de son écriture.
+
+- Les flags de clone() : ils déterminent différents comportements et éléments du contexte partagés ou non. Il faudrait éviter de réduire leur fonctionnement à quelques ressources simplement « copiées » ou « partagées ».
+
+## Annexes
+
+_CoW: copy-on-write permet à plusieurs processus ou fichiers linux de partager la même ressource physique en memoire ou sur disque jusqu'à ce qu'une modification survienne. -> réduit considérablement la consommation de mémoire et améliore les performance lors de la création de processus ou de la copie de fichier. Grosso modo: duplique la mémoire en lecture seule, la duplication physique est effectué uniquement si un processus tente d'y écrire quelque chose. Copiant alors les données et les mettant à jour._
